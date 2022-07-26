@@ -10,6 +10,8 @@ import (
 )
 
 func TestAccAlicloudCSKubernetesClustersDataSource(t *testing.T) {
+	checkoutAccount(t, true)
+	defer checkoutAccount(t, false)
 	rand := acctest.RandIntRange(1000000, 9999999)
 	resourceId := "data.alicloud_cs_kubernetes_clusters.default"
 
@@ -103,47 +105,55 @@ func dataSourceCSKubernetesClustersConfigDependence(name string) string {
 variable "name" {
 	default = "%s"
 }
-data "alicloud_zones" default {
+data "alicloud_zones" "default" {
   available_resource_creation = "VSwitch"
 }
 
 data "alicloud_instance_types" "default_m" {
 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
-	cpu_core_count = 2
-	memory_size = 4
+	cpu_core_count = 4
+	memory_size = 8
 	kubernetes_node_role = "Master"
 }
 
 data "alicloud_instance_types" "default_w" {
 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
-	cpu_core_count = 2
-	memory_size = 4
+	cpu_core_count = 4
+	memory_size = 8
 	kubernetes_node_role = "Worker"
 }
 
-resource "alicloud_vpc" "default" {
-  vpc_name = "${var.name}"
-  cidr_block = "10.1.0.0/21"
+data "alicloud_vpcs" "default" {
+	name_regex = "default-NODELETING"
+}
+data "alicloud_vswitches" "default" {
+	vpc_id = data.alicloud_vpcs.default.ids.0
+	zone_id      = data.alicloud_zones.default.zones.0.id
 }
 
-resource "alicloud_vswitch" "default" {
-  vswitch_name = "${var.name}"
-  vpc_id = "${alicloud_vpc.default.id}"
-  cidr_block = "10.1.1.0/24"
-  availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+resource "alicloud_vswitch" "vswitch" {
+  count             = length(data.alicloud_vswitches.default.ids) > 0 ? 0 : 1
+  vpc_id            = data.alicloud_vpcs.default.ids.0
+  cidr_block        = cidrsubnet(data.alicloud_vpcs.default.vpcs[0].cidr_block, 8, 8)
+  zone_id           = data.alicloud_zones.default.zones.0.id
+  vswitch_name      = var.name
+}
+
+locals {
+  vswitch_id = length(data.alicloud_vswitches.default.ids) > 0 ? data.alicloud_vswitches.default.ids[0] : concat(alicloud_vswitch.vswitch.*.id, [""])[0]
 }
 
 resource "alicloud_cs_kubernetes" "default" {
   name = "${var.name}"
-  master_vswitch_ids = ["${alicloud_vswitch.default.id}","${alicloud_vswitch.default.id}","${alicloud_vswitch.default.id}"]
-  worker_vswitch_ids = ["${alicloud_vswitch.default.id}"]
+  master_vswitch_ids = ["${local.vswitch_id}","${local.vswitch_id}","${local.vswitch_id}"]
+  worker_vswitch_ids = ["${local.vswitch_id}"]
   new_nat_gateway = true
   master_instance_types = ["${data.alicloud_instance_types.default_m.instance_types.0.id}","${data.alicloud_instance_types.default_m.instance_types.0.id}","${data.alicloud_instance_types.default_m.instance_types.0.id}"]
   worker_instance_types = ["${data.alicloud_instance_types.default_w.instance_types.0.id}"]
-  worker_number = "1"
+  worker_number = 1
   password = "Yourpassword1234"
-  pod_cidr = "192.168.1.0/24"
-  service_cidr = "192.168.2.0/24"
+  pod_cidr = "172.20.0.0/16"
+  service_cidr = "172.21.0.0/20"
   enable_ssh = true
   install_cloud_monitor = true
   worker_disk_category  = "cloud_ssd"

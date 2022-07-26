@@ -2,6 +2,7 @@ package alicloud
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/aliyun/terraform-provider-alicloud/alicloud/connectivity"
@@ -10,6 +11,10 @@ import (
 )
 
 func TestAccAlicloudCSServerlessKubernetesClustersDataSource(t *testing.T) {
+	prevRegion := os.Getenv("ALICLOUD_REGION")
+	os.Setenv("ALICLOUD_REGION", "ap-southeast-1")
+	defer os.Setenv("ALICLOUD_REGION", prevRegion)
+
 	rand := acctest.RandIntRange(1000000, 9999999)
 	resourceId := "data.alicloud_cs_serverless_kubernetes_clusters.default"
 
@@ -96,30 +101,41 @@ variable "name" {
 	default = "%s"
 }
 
-data "alicloud_zones" default {
-  available_resource_creation = "VSwitch"
+data "alicloud_eci_zones" "default" {
 }
 
-resource "alicloud_vpc" "default" {
-  vpc_name = "${var.name}"
-  cidr_block = "10.1.0.0/21"
+data "alicloud_vpcs" "default" {
+	name_regex = "default-NODELETING"
 }
 
-resource "alicloud_vswitch" "default" {
-  vswitch_name = "${var.name}"
-  vpc_id = "${alicloud_vpc.default.id}"
-  cidr_block = "10.1.1.0/24"
-  availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+data "alicloud_vswitches" "default" {
+	vpc_id   = data.alicloud_vpcs.default.ids.0
+	zone_id  = data.alicloud_eci_zones.default.zones.0.zone_ids.0
+}
+
+resource "alicloud_vswitch" "vswitch" {
+  count             = length(data.alicloud_vswitches.default.ids) > 0 ? 0 : 1
+  vpc_id            = data.alicloud_vpcs.default.ids.0
+  cidr_block        = cidrsubnet(data.alicloud_vpcs.default.vpcs[0].cidr_block, 8, 8)
+  zone_id           = data.alicloud_eci_zones.default.zones.0.zone_ids.0
+  vswitch_name      = var.name
+}
+
+locals {
+  vswitch_id = length(data.alicloud_vswitches.default.ids) > 0 ? data.alicloud_vswitches.default.ids[0] : concat(alicloud_vswitch.vswitch.*.id, [""])[0]
 }
 
 resource "alicloud_cs_serverless_kubernetes" "default" {
   name_prefix = "${var.name}"
-  vpc_id = "${alicloud_vpc.default.id}"
-  vswitch_id = "${alicloud_vswitch.default.id}"
+  vpc_id = data.alicloud_vpcs.default.ids.0
+  vswitch_ids = [local.vswitch_id]
   new_nat_gateway = true
+  cluster_spec = "ack.pro.small" 
   endpoint_public_access_enabled = true
   private_zone = false
   deletion_protection = false
+  service_cidr = "10.0.1.0/24"
+  load_balancer_spec = "slb.s2.small"
   tags = {
 		"k-aa":"v-aa"
 		"k-bb":"v-aa",

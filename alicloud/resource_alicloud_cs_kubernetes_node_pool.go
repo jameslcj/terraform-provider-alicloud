@@ -3,11 +3,15 @@ package alicloud
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"regexp"
 	"time"
 
+	"github.com/alibabacloud-go/tea/tea"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 
+	roacs "github.com/alibabacloud-go/cs-20151215/v3/client"
 	"github.com/aliyun/terraform-provider-alicloud/alicloud/connectivity"
 	"github.com/denverdino/aliyungo/common"
 	"github.com/denverdino/aliyungo/cs"
@@ -15,6 +19,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 )
+
+const defaultNodePoolType = "ess"
 
 func resourceAlicloudCSKubernetesNodePool() *schema.Resource {
 	return &schema.Resource{
@@ -42,9 +48,17 @@ func resourceAlicloudCSKubernetesNodePool() *schema.Resource {
 				Required: true,
 			},
 			"node_count": {
-				Type:     schema.TypeInt,
-				Optional: true,
-				Computed: true,
+				Type:          schema.TypeInt,
+				Optional:      true,
+				Computed:      true,
+				ConflictsWith: []string{"instances", "desired_size"},
+				Deprecated:    "Field 'node_count' has been deprecated from provider version 1.158.0. New field 'desired_size' instead.",
+			},
+			"desired_size": {
+				Type:          schema.TypeInt,
+				Optional:      true,
+				Computed:      true,
+				ConflictsWith: []string{"instances", "node_count"},
 			},
 			"vpc_id": {
 				Type:     schema.TypeString,
@@ -68,27 +82,34 @@ func resourceAlicloudCSKubernetesNodePool() *schema.Resource {
 				MaxItems: 10,
 			},
 			"password": {
-				Type:             schema.TypeString,
-				Optional:         true,
-				Sensitive:        true,
-				ConflictsWith:    []string{"key_name", "kms_encrypted_password"},
-				DiffSuppressFunc: csForceUpdateSuppressFunc,
+				Type:          schema.TypeString,
+				Optional:      true,
+				Sensitive:     true,
+				ConflictsWith: []string{"key_name", "kms_encrypted_password"},
 			},
 			"key_name": {
-				Type:             schema.TypeString,
-				Optional:         true,
-				ConflictsWith:    []string{"password", "kms_encrypted_password"},
-				DiffSuppressFunc: csForceUpdateSuppressFunc,
+				Type:          schema.TypeString,
+				Optional:      true,
+				ConflictsWith: []string{"password", "kms_encrypted_password"},
 			},
 			"kms_encrypted_password": {
 				Type:          schema.TypeString,
 				Optional:      true,
 				ConflictsWith: []string{"password", "key_name"},
 			},
-			"security_group_id": {
-				Type:     schema.TypeString,
+			"kms_encryption_context": {
+				Type:     schema.TypeMap,
 				Optional: true,
-				Computed: true,
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					return d.Get("kms_encrypted_password").(string) == ""
+				},
+				Elem: schema.TypeString,
+			},
+			"security_group_id": {
+				Type:       schema.TypeString,
+				Optional:   true,
+				Computed:   true,
+				Deprecated: "Field 'security_group_id' has been deprecated from provider version 1.145.0. New field 'security_group_ids' instead",
 			},
 			"system_disk_category": {
 				Type:     schema.TypeString,
@@ -107,10 +128,39 @@ func resourceAlicloudCSKubernetesNodePool() *schema.Resource {
 				ValidateFunc:     validation.StringInSlice([]string{"PL0", "PL1", "PL2", "PL3"}, false),
 				DiffSuppressFunc: csNodepoolDiskPerformanceLevelDiffSuppressFunc,
 			},
+			"system_disk_encrypted": {
+				Type:     schema.TypeBool,
+				Optional: true,
+			},
+			"system_disk_kms_key": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			"system_disk_snapshot_policy_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			"system_disk_encrypt_algorithm": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				ValidateFunc: validation.StringInSlice([]string{"aes-256", "sm4-128"}, false),
+			},
+			"platform": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				Computed:     true,
+				ValidateFunc: validation.StringInSlice([]string{"AliyunLinux", "Windows", "CentOS", "WindowsCore"}, false),
+				Deprecated:   "Field 'platform' has been deprecated from provider version 1.145.0. New field 'image_type' instead",
+			},
 			"image_id": {
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
+			},
+			"cpu_policy": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				ValidateFunc: validation.StringInSlice([]string{"none", "static"}, false),
 			},
 			"instance_charge_type": {
 				Type:         schema.TypeString,
@@ -289,7 +339,6 @@ func resourceAlicloudCSKubernetesNodePool() *schema.Resource {
 			"scaling_config": {
 				Type:     schema.TypeList,
 				Optional: true,
-				Computed: true,
 				MaxItems: 1,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
@@ -309,20 +358,137 @@ func resourceAlicloudCSKubernetesNodePool() *schema.Resource {
 							ValidateFunc: validation.StringInSlice([]string{"cpu", "gpu", "gpushare", "spot"}, false),
 						},
 						"is_bond_eip": {
-							Type:     schema.TypeBool,
-							Optional: true,
+							Type:          schema.TypeBool,
+							Optional:      true,
+							ConflictsWith: []string{"internet_charge_type"},
 						},
 						"eip_internet_charge_type": {
-							Type:         schema.TypeString,
-							Optional:     true,
-							ValidateFunc: validation.StringInSlice([]string{"PayByBandwidth", "PayByTraffic"}, false),
+							Type:          schema.TypeString,
+							Optional:      true,
+							ValidateFunc:  validation.StringInSlice([]string{"PayByBandwidth", "PayByTraffic"}, false),
+							ConflictsWith: []string{"internet_charge_type"},
 						},
 						"eip_bandwidth": {
-							Type:         schema.TypeInt,
-							Optional:     true,
-							ValidateFunc: validation.IntBetween(1, 500),
+							Type:          schema.TypeInt,
+							Optional:      true,
+							ValidateFunc:  validation.IntBetween(1, 500),
+							ConflictsWith: []string{"internet_charge_type"},
 						},
 					},
+				},
+				ConflictsWith: []string{"instances"},
+			},
+			"scaling_policy": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				Computed:         true,
+				ValidateFunc:     validation.StringInSlice([]string{"release", "recycle"}, false),
+				DiffSuppressFunc: csNodepoolScalingPolicyDiffSuppressFunc,
+			},
+			"resource_group_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+			},
+			"internet_charge_type": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				Computed:     true,
+				ValidateFunc: validation.StringInSlice([]string{"PayByTraffic", "PayByBandwidth"}, false),
+			},
+			"internet_max_bandwidth_out": {
+				Type:     schema.TypeInt,
+				Optional: true,
+				Computed: true,
+			},
+			"spot_strategy": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				ValidateFunc: validation.StringInSlice([]string{"NoSpot", "SpotWithPriceLimit", "SpotAsPriceGo"}, false),
+			},
+			"spot_price_limit": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"instance_type": {
+							Type:     schema.TypeString,
+							Optional: true,
+						},
+						"price_limit": {
+							Type:     schema.TypeString,
+							Optional: true,
+						},
+					},
+				},
+				DiffSuppressFunc: csNodepoolSpotInstanceSettingDiffSuppressFunc,
+			},
+			"instances": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+				MaxItems:      100,
+				ConflictsWith: []string{"node_count", "scaling_config", "desired_size"},
+			},
+			"keep_instance_name": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Computed: true,
+			},
+			"format_disk": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Computed: true,
+			},
+			"security_group_ids": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+				MaxItems: 5,
+				Computed: true,
+			},
+			"image_type": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				Computed:     true,
+				ValidateFunc: validation.StringInSlice([]string{"AliyunLinux", "AliyunLinux3", "AliyunLinux3Arm64", "AliyunLinuxUEFI", "CentOS", "Windows", "WindowsCore", "AliyunLinux Qboot", "ContainerOS"}, false),
+			},
+			"runtime_name": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+			},
+			"runtime_version": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+			},
+			"deployment_set_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+				ForceNew: true,
+			},
+			"cis_enabled": {
+				Type:     schema.TypeBool,
+				Optional: true,
+			},
+			"soc_enabled": {
+				Type:     schema.TypeBool,
+				Optional: true,
+			},
+			"rds_instances": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
 				},
 			},
 		},
@@ -373,6 +539,11 @@ func resourceAlicloudCSKubernetesNodePoolCreate(d *schema.ResourceData, meta int
 		return WrapErrorf(err, "ResourceID:%s , TaskID:%s ", d.Id(), nodePool.TaskID)
 	}
 
+	// attach existing node
+	if v, ok := d.GetOk("instances"); ok && v != nil {
+		attachExistingInstance(d, meta)
+	}
+
 	return resourceAlicloudCSNodePoolRead(d, meta)
 }
 
@@ -398,7 +569,6 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 
 	if d.HasChange("node_count") {
 		oldV, newV := d.GetChange("node_count")
-
 		oldValue, ok := oldV.(int)
 		if ok != true {
 			return WrapErrorf(fmt.Errorf("node_count old value can not be parsed"), "parseError %d", oldValue)
@@ -409,7 +579,7 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 		}
 
 		if newValue < oldValue {
-			_ = removeNodePoolNodes(d, meta, parts)
+			removeNodePoolNodes(d, meta, parts, nil, nil)
 			// The removal of a node is logically independent.
 			// The removal of a node should not involve parameter changes.
 			return resourceAlicloudCSNodePoolRead(d, meta)
@@ -417,10 +587,10 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 		update = true
 		args.Count = int64(newValue) - int64(oldValue)
 	}
-	args.NodePoolInfo.Name = d.Get("name").(string)
+
 	if d.HasChange("name") {
 		update = true
-		args.NodePoolInfo.Name = d.Get("name").(string)
+		args.NodePoolInfo.Name = tea.TransInterfaceToString(d.Get("name"))
 	}
 	if d.HasChange("vswitch_ids") {
 		update = true
@@ -444,24 +614,35 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 	}
 
 	if v, ok := d.GetOk("instance_charge_type"); ok {
-		args.InstanceChargeType = v.(string)
-		if args.InstanceChargeType == string(PrePaid) {
+		args.InstanceChargeType = tea.TransInterfaceToString(v)
+		if tea.StringValue(args.InstanceChargeType) == string(PrePaid) {
 			update = true
-			args.Period = d.Get("period").(int)
-			args.PeriodUnit = d.Get("period_unit").(string)
-			args.AutoRenew = d.Get("auto_renew").(bool)
-			args.AutoRenewPeriod = d.Get("auto_renew_period").(int)
+			args.Period = tea.TransInterfaceToInt(d.Get("period"))
+			args.PeriodUnit = tea.TransInterfaceToString(d.Get("period_unit"))
+			args.AutoRenew = tea.TransInterfaceToBool(d.Get("auto_renew"))
+			args.AutoRenewPeriod = tea.TransInterfaceToInt(d.Get("auto_renew_period"))
 		}
+	}
+
+	if d.HasChange("image_type") {
+		update = true
+		args.ScalingGroup.ImageType = tea.TransInterfaceToString(d.Get("image_type"))
+	}
+
+	if d.HasChange("platform") {
+		update = true
+		args.ScalingGroup.Platform = tea.TransInterfaceToString(d.Get("platform"))
+	}
+
+	if d.HasChange("desired_size") {
+		update = true
+		size := int64(d.Get("desired_size").(int))
+		args.ScalingGroup.DesiredSize = &size
 	}
 
 	if d.HasChange("install_cloud_monitor") {
 		update = true
-		args.CmsEnabled = d.Get("install_cloud_monitor").(bool)
-	}
-
-	if d.HasChange("unschedulable") {
-		update = true
-		args.Unschedulable = d.Get("unschedulable").(bool)
+		args.CmsEnabled = tea.TransInterfaceToBool(d.Get("install_cloud_monitor"))
 	}
 
 	if d.HasChange("instance_types") {
@@ -469,17 +650,31 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 		args.ScalingGroup.InstanceTypes = expandStringList(d.Get("instance_types").([]interface{}))
 	}
 
-	// password is required by update method
-	args.ScalingGroup.LoginPassword = d.Get("password").(string)
-	if d.HasChange("password") {
+	args.ScalingGroup.SystemDiskEncrypted = tea.TransInterfaceToBool(d.Get("system_disk_encrypted"))
+
+	if tea.BoolValue(args.ScalingGroup.SystemDiskEncrypted) && d.HasChanges("system_disk_encrypt_algorithm") {
 		update = true
-		args.ScalingGroup.LoginPassword = d.Get("password").(string)
+		args.ScalingGroup.SystemDiskEncryptAlgorithm = tea.TransInterfaceToString(d.Get("system_disk_encrypt_algorithm"))
 	}
 
-	args.ScalingGroup.KeyPair = d.Get("key_name").(string)
+	if tea.BoolValue(args.ScalingGroup.SystemDiskEncrypted) && d.HasChanges("system_disk_kms_key") {
+		update = true
+		args.ScalingGroup.SystemDiskKMSKeyId = tea.TransInterfaceToString(d.Get("system_disk_kms_key"))
+	}
+
+	if d.HasChanges("system_disk_snapshot_policy_id") {
+		update = true
+		args.ScalingGroup.WorkerSnapshotPolicyId = tea.TransInterfaceToString(d.Get("system_disk_snapshot_policy_id"))
+	}
+
+	if d.HasChange("password") {
+		update = true
+		args.ScalingGroup.LoginPassword = tea.TransInterfaceToString(d.Get("password"))
+	}
+
 	if d.HasChange("key_name") {
 		update = true
-		args.ScalingGroup.KeyPair = d.Get("key_name").(string)
+		args.ScalingGroup.KeyPair = tea.TransInterfaceToString(d.Get("key_name"))
 	}
 
 	if d.HasChange("security_group_id") {
@@ -494,17 +689,17 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 
 	if d.HasChange("system_disk_size") {
 		update = true
-		args.ScalingGroup.SystemDiskSize = int64(d.Get("system_disk_size").(int))
+		args.ScalingGroup.SystemDiskSize = tea.Int64(int64(d.Get("system_disk_size").(int)))
 	}
 
 	if d.HasChange("system_disk_performance_level") {
 		update = true
-		args.SystemDiskPerformanceLevel = d.Get("system_disk_performance_level").(string)
+		args.SystemDiskPerformanceLevel = tea.TransInterfaceToString(d.Get("system_disk_performance_level"))
 	}
 
 	if d.HasChange("image_id") {
 		update = true
-		args.ScalingGroup.ImageId = d.Get("image_id").(string)
+		args.ScalingGroup.ImageId = tea.TransInterfaceToString(d.Get("image_id"))
 	}
 
 	if d.HasChange("data_disks") {
@@ -537,25 +732,48 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 		if v := d.Get("user_data").(string); v != "" {
 			_, base64DecodeError := base64.StdEncoding.DecodeString(v)
 			if base64DecodeError == nil {
-				args.KubernetesConfig.UserData = v
+				args.KubernetesConfig.UserData = tea.String(v)
 			} else {
-				args.KubernetesConfig.UserData = base64.StdEncoding.EncodeToString([]byte(v))
+				args.KubernetesConfig.UserData = tea.String(base64.StdEncoding.EncodeToString([]byte(v)))
 			}
 		}
 	}
 
 	if d.HasChange("scaling_config") {
 		update = true
-		sc := d.Get("scaling_config").([]interface{})
-		args.AutoScaling = setAutoScalingConfig(sc)
+		args.AutoScaling = setAutoScalingConfig(d.Get("scaling_config").([]interface{}))
 	}
 
-	if v, ok := d.Get("management").([]interface{}); len(v) > 0 && ok {
-		args.Management = setManagedNodepoolConfig(v)
+	if d.HasChange("management") {
+		update = true
+		args.Management = setManagedNodepoolConfig(d.Get("management").([]interface{}))
+	}
+
+	if d.HasChange("internet_max_bandwidth_out") {
+		update = true
+		args.InternetMaxBandwidthOut = tea.TransInterfaceToInt(d.Get("internet_max_bandwidth_out"))
+	}
+
+	if d.HasChange("scaling_policy") {
+		update = true
+		args.ScalingPolicy = tea.TransInterfaceToString(d.Get("scaling_policy"))
+	}
+
+	// spot
+	if d.HasChange("spot_strategy") {
+		update = true
+		args.SpotStrategy = tea.TransInterfaceToString(d.Get("spot_strategy"))
+	}
+	if d.HasChange("spot_price_limit") {
+		update = true
+		args.SpotPriceLimit = setSpotPriceLimit(d.Get("spot_price_limit").([]interface{}))
+	}
+	if d.HasChange("rds_instances") {
+		update = true
+		args.RdsInstances = expandStringList(d.Get("rds_instances").([]interface{}))
 	}
 
 	if update {
-
 		var resoponse interface{}
 		if err := invoker.Run(func() error {
 			var err error
@@ -575,12 +793,46 @@ func resourceAlicloudCSNodePoolUpdate(d *schema.ResourceData, meta interface{}) 
 			addDebug("UpdateKubernetesNodePool", resoponse, resizeRequestMap)
 		}
 
-		stateConf := BuildStateConf([]string{"scaling", "updating"}, []string{"active"}, d.Timeout(schema.TimeoutUpdate), 30*time.Second, csService.CsKubernetesNodePoolStateRefreshFunc(d.Id(), []string{"deleting", "failed"}))
+		stateConf := BuildStateConf([]string{"scaling", "updating", "removing"}, []string{"active"}, d.Timeout(schema.TimeoutUpdate), 10*time.Second, csService.CsKubernetesNodePoolStateRefreshFunc(d.Id(), []string{"deleting", "failed"}))
 
 		if _, err := stateConf.WaitForState(); err != nil {
 			return WrapErrorf(err, IdMsg, d.Id())
 		}
 	}
+
+	// attach or remove existing node
+	if d.HasChange("instances") {
+		rawOldValue, rawNewValue := d.GetChange("instances")
+		oldValue, ok := rawOldValue.([]interface{})
+		if ok != true {
+			return WrapErrorf(fmt.Errorf("instances old value can not be parsed"), "parseError %d", oldValue)
+		}
+		newValue, ok := rawNewValue.([]interface{})
+		if ok != true {
+			return WrapErrorf(fmt.Errorf("instances new value can not be parsed"), "parseError %d", oldValue)
+		}
+
+		if len(newValue) > len(oldValue) {
+			attachExistingInstance(d, meta)
+		} else {
+			removeNodePoolNodes(d, meta, parts, oldValue, newValue)
+		}
+	}
+
+	_ = resource.Retry(10*time.Minute, func() *resource.RetryError {
+		log.Printf("[DEBUG] Start retry fetch node pool info: %s", d.Id())
+		nodePoolDetail, err := csService.DescribeCsKubernetesNodePool(d.Id())
+		if err != nil {
+			return resource.NonRetryableError(err)
+		}
+
+		if nodePoolDetail.TotalNodes != d.Get("node_count").(int) && nodePoolDetail.TotalNodes != d.Get("desired_size").(int) {
+			time.Sleep(20 * time.Second)
+			return resource.RetryableError(Error("[ERROR] The number of nodes is inconsistent %s", d.Id()))
+		}
+
+		return resource.NonRetryableError(Error("[DEBUG] The number of nodes is the same"))
+	})
 
 	update = false
 	d.Partial(false)
@@ -611,18 +863,44 @@ func resourceAlicloudCSNodePoolRead(d *schema.ResourceData, meta interface{}) er
 	d.Set("system_disk_size", object.SystemDiskSize)
 	d.Set("system_disk_performance_level", object.SystemDiskPerformanceLevel)
 	d.Set("image_id", object.ImageId)
+	d.Set("platform", object.Platform)
+	d.Set("cpu_policy", object.CpuPolicy)
+	d.Set("scaling_policy", object.ScalingPolicy)
 	d.Set("node_name_mode", object.NodeNameMode)
 	d.Set("user_data", object.UserData)
 	d.Set("scaling_group_id", object.ScalingGroupId)
 	d.Set("unschedulable", object.Unschedulable)
 	d.Set("instance_charge_type", object.InstanceChargeType)
-	if object.InstanceChargeType == "PrePaid" {
+	d.Set("resource_group_id", object.ResourceGroupId)
+	d.Set("spot_strategy", object.SpotStrategy)
+	d.Set("internet_charge_type", object.InternetChargeType)
+	d.Set("internet_max_bandwidth_out", object.InternetMaxBandwidthOut)
+	d.Set("install_cloud_monitor", object.CmsEnabled)
+	d.Set("image_type", object.ScalingGroup.ImageType)
+	d.Set("security_group_ids", object.ScalingGroup.SecurityGroupIds)
+	d.Set("runtime_name", object.Runtime)
+	d.Set("runtime_version", object.RuntimeVersion)
+	d.Set("deployment_set_id", object.DeploymentSetId)
+	d.Set("cis_enabled", object.CisEnabled)
+	d.Set("soc_enabled", object.SocEnabled)
+
+	if object.DesiredSize != nil {
+		d.Set("desired_size", *object.DesiredSize)
+	}
+
+	if tea.StringValue(object.InstanceChargeType) == "PrePaid" {
 		d.Set("period", object.Period)
 		d.Set("period_unit", object.PeriodUnit)
 		d.Set("auto_renew", object.AutoRenew)
 		d.Set("auto_renew_period", object.AutoRenewPeriod)
-		d.Set("install_cloud_monitor", object.CmsEnabled)
 	}
+
+	d.Set("system_disk_encrypted", object.SystemDiskEncrypted)
+	d.Set("system_disk_kms_key", object.SystemDiskKMSKeyId)
+	d.Set("system_disk_encrypt_algorithm", object.SystemDiskEncryptAlgorithm)
+	d.Set("system_disk_snapshot_policy_id", object.WorkerSnapshotPolicyId)
+
+	d.Set("rds_instances", object.RdsInstances)
 
 	if passwd, ok := d.GetOk("password"); ok && passwd.(string) != "" {
 		d.Set("password", passwd)
@@ -650,13 +928,19 @@ func resourceAlicloudCSNodePoolRead(d *schema.ResourceData, meta interface{}) er
 		return WrapError(err)
 	}
 
-	if m, ok := d.GetOk("management"); ok && m != nil {
+	if tea.BoolValue(object.Management.Enable) {
 		if err := d.Set("management", flattenManagementNodepoolConfig(&object.Management)); err != nil {
 			return WrapError(err)
 		}
 	}
 
-	if err := d.Set("scaling_config", flattenAutoScalingConfig(&object.AutoScaling)); err != nil {
+	if tea.BoolValue(object.AutoScaling.Enable) {
+		if err := d.Set("scaling_config", flattenAutoScalingConfig(&object.AutoScaling)); err != nil {
+			return WrapError(err)
+		}
+	}
+
+	if err := d.Set("spot_price_limit", flattenSpotPriceLimit(object.SpotPriceLimit)); err != nil {
 		return WrapError(err)
 	}
 
@@ -673,14 +957,15 @@ func resourceAlicloudCSNodePoolDelete(d *schema.ResourceData, meta interface{}) 
 		return WrapError(err)
 	}
 
-	// delete all nodes
-	_ = removeNodePoolNodes(d, meta, parts)
+	// delete all nodes [deprecated]
+	// removeNodePoolNodes(d, meta, parts, nil, nil)
 
+	// force delete
 	var response interface{}
 	err = resource.Retry(30*time.Minute, func() *resource.RetryError {
 		if err := invoker.Run(func() error {
 			raw, err := client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
-				return nil, csClient.DeleteNodePool(parts[0], parts[1])
+				return nil, csClient.ForceDeleteNodePool(parts[0], parts[1])
 			})
 			response = raw
 			return err
@@ -738,31 +1023,39 @@ func buildNodePoolArgs(d *schema.ResourceData, meta interface{}) (*cs.CreateNode
 			if err != nil {
 				return nil, WrapError(err)
 			}
-			password = decryptResp.Plaintext
+			password = decryptResp
 		}
 	}
 
 	creationArgs := &cs.CreateNodePoolRequest{
 		RegionId: common.Region(client.RegionId),
-		Count:    int64(d.Get("node_count").(int)),
 		NodePoolInfo: cs.NodePoolInfo{
-			Name:         d.Get("name").(string),
-			NodePoolType: "ess", // hard code the type
+			Name:         tea.TransInterfaceToString(d.Get("name")),
+			NodePoolType: defaultNodePoolType, // hard code the type
 		},
 		ScalingGroup: cs.ScalingGroup{
 			VpcId:              vpcId,
 			VswitchIds:         expandStringList(d.Get("vswitch_ids").([]interface{})),
 			InstanceTypes:      expandStringList(d.Get("instance_types").([]interface{})),
-			LoginPassword:      password,
-			KeyPair:            d.Get("key_name").(string),
+			LoginPassword:      tea.String(password),
+			KeyPair:            tea.TransInterfaceToString(d.Get("key_name")),
 			SystemDiskCategory: aliyungoecs.DiskCategory(d.Get("system_disk_category").(string)),
-			SystemDiskSize:     int64(d.Get("system_disk_size").(int)),
+			SystemDiskSize:     tea.Int64(int64(d.Get("system_disk_size").(int))),
 			SecurityGroupId:    d.Get("security_group_id").(string),
-			ImageId:            d.Get("image_id").(string),
+			ImageId:            tea.TransInterfaceToString(d.Get("image_id")),
 		},
 		KubernetesConfig: cs.KubernetesConfig{
 			NodeNameMode: d.Get("node_name_mode").(string),
 		},
+	}
+
+	if v, ok := d.GetOkExists("node_count"); ok {
+		creationArgs.Count = int64(v.(int))
+	}
+
+	if v, ok := d.GetOkExists("desired_size"); ok {
+		size := int64(v.(int))
+		creationArgs.DesiredSize = &size
 	}
 
 	setNodePoolDataDisks(&creationArgs.ScalingGroup, d)
@@ -771,33 +1064,50 @@ func buildNodePoolArgs(d *schema.ResourceData, meta interface{}) (*cs.CreateNode
 	setNodePoolLabels(&creationArgs.KubernetesConfig, d)
 
 	if v, ok := d.GetOk("instance_charge_type"); ok {
-		creationArgs.InstanceChargeType = v.(string)
-		if creationArgs.InstanceChargeType == string(PrePaid) {
-			creationArgs.Period = d.Get("period").(int)
-			creationArgs.PeriodUnit = d.Get("period_unit").(string)
-			creationArgs.AutoRenew = d.Get("auto_renew").(bool)
-			creationArgs.AutoRenewPeriod = d.Get("auto_renew_period").(int)
+		creationArgs.InstanceChargeType = tea.TransInterfaceToString(v)
+		if tea.StringValue(creationArgs.InstanceChargeType) == string(PrePaid) {
+			creationArgs.Period = tea.TransInterfaceToInt(d.Get("period"))
+			creationArgs.PeriodUnit = tea.TransInterfaceToString(d.Get("period_unit"))
+			creationArgs.AutoRenew = tea.TransInterfaceToBool(d.Get("auto_renew"))
+			creationArgs.AutoRenewPeriod = tea.TransInterfaceToInt(d.Get("auto_renew_period"))
 		}
 	}
 
+	if v, ok := d.GetOkExists("system_disk_encrypted"); ok {
+		creationArgs.SystemDiskEncrypted = tea.TransInterfaceToBool(v)
+		if tea.BoolValue(creationArgs.SystemDiskEncrypted) {
+			creationArgs.SystemDiskKMSKeyId = tea.TransInterfaceToString(d.Get("system_disk_kms_key"))
+			creationArgs.SystemDiskEncryptAlgorithm = tea.TransInterfaceToString(d.Get("system_disk_encrypt_algorithm"))
+		}
+	}
+
+	if v, ok := d.GetOk("deployment_set_id"); ok {
+		creationArgs.DeploymentSetId = tea.TransInterfaceToString(v)
+	}
+
 	if v, ok := d.GetOk("install_cloud_monitor"); ok {
-		creationArgs.CmsEnabled = v.(bool)
+		creationArgs.CmsEnabled = tea.TransInterfaceToBool(v)
 	}
 
 	if v, ok := d.GetOk("unschedulable"); ok {
-		creationArgs.Unschedulable = v.(bool)
+		creationArgs.Unschedulable = tea.TransInterfaceToBool(v)
 	}
 
 	if v, ok := d.GetOk("user_data"); ok && v != "" {
-		_, base64DecodeError := base64.StdEncoding.DecodeString(v.(string))
+		data := v.(string)
+		_, base64DecodeError := base64.StdEncoding.DecodeString(data)
 		if base64DecodeError == nil {
-			creationArgs.KubernetesConfig.UserData = v.(string)
+			creationArgs.KubernetesConfig.UserData = tea.String(data)
 		} else {
-			creationArgs.KubernetesConfig.UserData = base64.StdEncoding.EncodeToString([]byte(v.(string)))
+			creationArgs.KubernetesConfig.UserData = tea.String(base64.StdEncoding.EncodeToString([]byte(data)))
 		}
 	}
 
 	// set auto scaling config
+	if v, ok := d.GetOk("scaling_policy"); ok {
+		creationArgs.ScalingPolicy = tea.TransInterfaceToString(v)
+	}
+
 	if v, ok := d.GetOk("scaling_config"); ok {
 		if sc, ok := v.([]interface{}); len(sc) > 0 && ok {
 			creationArgs.AutoScaling = setAutoScalingConfig(sc)
@@ -812,7 +1122,76 @@ func buildNodePoolArgs(d *schema.ResourceData, meta interface{}) (*cs.CreateNode
 	}
 
 	if v, ok := d.GetOk("system_disk_performance_level"); ok {
-		creationArgs.SystemDiskPerformanceLevel = v.(string)
+		creationArgs.SystemDiskPerformanceLevel = tea.TransInterfaceToString(v)
+	}
+
+	if v, ok := d.GetOk("system_disk_snapshot_policy_id"); ok {
+		creationArgs.WorkerSnapshotPolicyId = tea.TransInterfaceToString(v)
+	}
+
+	if v, ok := d.GetOk("resource_group_id"); ok {
+		creationArgs.ResourceGroupId = tea.TransInterfaceToString(v)
+	}
+
+	// setting spot instance
+	if v, ok := d.GetOk("spot_strategy"); ok {
+		creationArgs.SpotStrategy = tea.TransInterfaceToString(v)
+	}
+
+	if v, ok := d.GetOk("spot_price_limit"); ok {
+		creationArgs.SpotPriceLimit = setSpotPriceLimit(v.([]interface{}))
+	}
+	if v, ok := d.GetOk("internet_charge_type"); ok {
+		creationArgs.InternetChargeType = tea.TransInterfaceToString(v)
+	}
+	if v, ok := d.GetOk("internet_max_bandwidth_out"); ok {
+		creationArgs.InternetMaxBandwidthOut = tea.TransInterfaceToInt(v)
+	}
+
+	if v, ok := d.GetOk("security_group_ids"); ok {
+		creationArgs.SecurityGroupIds = expandStringList(v.([]interface{}))
+	}
+
+	if v, ok := d.GetOk("platform"); ok {
+		creationArgs.Platform = tea.TransInterfaceToString(v)
+	}
+
+	if v, ok := d.GetOk("image_type"); ok {
+		creationArgs.ImageType = tea.TransInterfaceToString(v)
+	}
+
+	if v, ok := d.GetOk("runtime_name"); ok {
+		creationArgs.Runtime = v.(string)
+	}
+
+	if v, ok := d.GetOk("runtime_version"); ok {
+		creationArgs.RuntimeVersion = v.(string)
+	}
+
+	cisEnabled, socEnabled := false, false
+	if v, ok := d.GetOkExists("cis_enabled"); ok {
+		cisEnabled = v.(bool)
+	}
+	if v, ok := d.GetOkExists("soc_enabled"); ok {
+		socEnabled = v.(bool)
+	}
+	if (cisEnabled || socEnabled) && tea.StringValue(creationArgs.Platform) != "AliyunLinux" && tea.StringValue(creationArgs.ImageType) != "AliyunLinux" {
+		return creationArgs, fmt.Errorf("SOC/CIS security reinforcement is not supported for current platform/image_type")
+	}
+	if cisEnabled && socEnabled {
+		return creationArgs, fmt.Errorf("setting SOC and CIS together is not supported")
+	} else if cisEnabled {
+		creationArgs.CisEnabled = tea.Bool(cisEnabled)
+	} else if socEnabled {
+		creationArgs.SocEnabled = tea.Bool(socEnabled)
+	}
+
+	if v, ok := d.GetOk("rds_instances"); ok {
+		creationArgs.RdsInstances = expandStringList(v.([]interface{}))
+	}
+
+	if v, ok := d.GetOk("cpu_policy"); ok {
+		creationArgs.CpuPolicy = v.(string)
 	}
 
 	return creationArgs, nil
@@ -838,19 +1217,16 @@ func ConvertCsTags(d *schema.ResourceData) ([]cs.Tag, error) {
 }
 
 func setNodePoolTags(scalingGroup *cs.ScalingGroup, d *schema.ResourceData) error {
-	if _, ok := d.GetOk("tags"); ok {
-		if tags, err := ConvertCsTags(d); err == nil {
-			scalingGroup.Tags = tags
-		}
+	if tags, err := ConvertCsTags(d); err == nil {
+		scalingGroup.Tags = tags
 	}
-
 	return nil
 }
 
 func setNodePoolLabels(config *cs.KubernetesConfig, d *schema.ResourceData) error {
+	labels := make([]cs.Label, 0)
 	if v, ok := d.GetOk("labels"); ok && len(v.([]interface{})) > 0 {
 		vl := v.([]interface{})
-		labels := make([]cs.Label, 0)
 		for _, i := range vl {
 			if m, ok := i.(map[string]interface{}); ok {
 				labels = append(labels, cs.Label{
@@ -858,10 +1234,9 @@ func setNodePoolLabels(config *cs.KubernetesConfig, d *schema.ResourceData) erro
 					Value: m["value"].(string),
 				})
 			}
-
 		}
-		config.Labels = labels
 	}
+	config.Labels = labels
 
 	return nil
 }
@@ -891,9 +1266,9 @@ func setNodePoolDataDisks(scalingGroup *cs.ScalingGroup, d *schema.ResourceData)
 }
 
 func setNodePoolTaints(config *cs.KubernetesConfig, d *schema.ResourceData) error {
+	taints := make([]cs.Taint, 0)
 	if v, ok := d.GetOk("taints"); ok && len(v.([]interface{})) > 0 {
 		vl := v.([]interface{})
-		taints := make([]cs.Taint, 0)
 		for _, i := range vl {
 			if m, ok := i.(map[string]interface{}); ok {
 				taints = append(taints, cs.Taint{
@@ -904,36 +1279,37 @@ func setNodePoolTaints(config *cs.KubernetesConfig, d *schema.ResourceData) erro
 			}
 
 		}
-		config.Taints = taints
 	}
+	config.Taints = taints
 
 	return nil
 }
 
 func setManagedNodepoolConfig(l []interface{}) (config cs.Management) {
 	if len(l) == 0 || l[0] == nil {
+		config.Enable = tea.Bool(false)
 		return config
 	}
 
 	m := l[0].(map[string]interface{})
 
 	// Once "management" is set, we think of it as creating a managed node pool
-	config.Enable = true
+	config.Enable = tea.Bool(true)
 
 	if v, ok := m["auto_repair"].(bool); ok {
-		config.AutoRepair = v
+		config.AutoRepair = tea.Bool(v)
 	}
 	if v, ok := m["auto_upgrade"].(bool); ok {
-		config.UpgradeConf.AutoUpgrade = v
+		config.UpgradeConf.AutoUpgrade = tea.Bool(v)
 	}
 	if v, ok := m["surge"].(int); ok {
-		config.UpgradeConf.Surge = int64(v)
+		config.UpgradeConf.Surge = tea.Int64(int64(v))
 	}
 	if v, ok := m["surge_percentage"].(int); ok {
-		config.UpgradeConf.SurgePercentage = int64(v)
+		config.UpgradeConf.SurgePercentage = tea.Int64(int64(v))
 	}
 	if v, ok := m["max_unavailable"].(int); ok {
-		config.UpgradeConf.MaxUnavailable = int64(v)
+		config.UpgradeConf.MaxUnavailable = tea.Int64(int64(v))
 	}
 
 	return config
@@ -941,34 +1317,66 @@ func setManagedNodepoolConfig(l []interface{}) (config cs.Management) {
 
 func setAutoScalingConfig(l []interface{}) (config cs.AutoScaling) {
 	if len(l) == 0 || l[0] == nil {
+		config.Enable = tea.Bool(false)
 		return config
 	}
 
 	m := l[0].(map[string]interface{})
 
 	// Once "scaling_config" is set, we think of it as creating a auto scaling node pool
-	config.Enable = true
+	config.Enable = tea.Bool(true)
 
 	if v, ok := m["min_size"].(int); ok {
-		config.MinInstances = int64(v)
+		config.MinInstances = tea.Int64(int64(v))
 	}
 	if v, ok := m["max_size"].(int); ok {
-		config.MaxInstances = int64(v)
+		config.MaxInstances = tea.Int64(int64(v))
 	}
 	if v, ok := m["type"].(string); ok {
-		config.Type = v
+		config.Type = tea.String(v)
 	}
 	if v, ok := m["is_bond_eip"].(bool); ok {
-		config.IsBindEip = &v
+		config.IsBindEip = tea.Bool(v)
 	}
 	if v, ok := m["eip_internet_charge_type"].(string); ok {
-		config.EipInternetChargeType = v
+		config.EipInternetChargeType = tea.String(v)
 	}
 	if v, ok := m["eip_bandwidth"].(int); ok {
-		config.EipBandWidth = int64(v)
+		config.EipBandWidth = tea.Int64(int64(v))
+	}
+	return config
+}
+
+func setSpotPriceLimit(l []interface{}) []cs.SpotPrice {
+	config := make([]cs.SpotPrice, 0)
+	if len(l) == 0 || l[0] == nil {
+		return config
+	}
+	for _, v := range l {
+		if m, ok := v.(map[string]interface{}); ok {
+			config = append(config, cs.SpotPrice{
+				InstanceType: m["instance_type"].(string),
+				PriceLimit:   m["price_limit"].(string),
+			})
+		}
 	}
 
 	return config
+}
+
+func flattenSpotPriceLimit(config []cs.SpotPrice) (m []map[string]interface{}) {
+	if config == nil {
+		return []map[string]interface{}{}
+	}
+
+	for _, spotInfo := range config {
+		m = append(m, map[string]interface{}{
+			"instance_type": spotInfo.InstanceType,
+			"price_limit":   spotInfo.PriceLimit,
+		})
+	}
+
+	return m
 }
 
 func flattenAutoScalingConfig(config *cs.AutoScaling) (m []map[string]interface{}) {
@@ -1013,6 +1421,7 @@ func flattenNodeDataDisksConfig(config []cs.NodePoolDataDisk) (m []map[string]in
 			"category":          disks.Category,
 			"encrypted":         disks.Encrypted,
 			"performance_level": disks.PerformanceLevel,
+			"kms_key_id":        disks.KMSKeyId,
 		})
 	}
 
@@ -1065,7 +1474,7 @@ func flattenTagsConfig(config []cs.Tag) map[string]string {
 	return m
 }
 
-func removeNodePoolNodes(d *schema.ResourceData, meta interface{}, parseId []string) error {
+func removeNodePoolNodes(d *schema.ResourceData, meta interface{}, parseId []string, oldNodes []interface{}, newNodes []interface{}) error {
 	client := meta.(*connectivity.AliyunClient)
 	csService := CsService{client}
 	invoker := NewInvoker()
@@ -1084,18 +1493,39 @@ func removeNodePoolNodes(d *schema.ResourceData, meta interface{}, parseId []str
 	}
 
 	ret := response.([]cs.KubernetesNodeType)
-	// filter out nodes
+	// fetch the NodeName of all nodes
 	var allNodeName []string
 	for _, value := range ret {
 		allNodeName = append(allNodeName, value.NodeName)
 	}
 
-	// remove nodes
 	removeNodesName := allNodeName
+
+	// remove automatically created nodes
 	if d.HasChange("node_count") {
 		o, n := d.GetChange("node_count")
 		count := o.(int) - n.(int)
 		removeNodesName = allNodeName[:count]
+	}
+
+	// remove manually added nodes
+	if d.HasChange("instances") {
+		var removeInstanceList []string
+		var attachNodeList []string
+		if oldNodes != nil && newNodes != nil {
+			attachNodeList = difference(expandStringList(oldNodes), expandStringList(newNodes))
+		}
+		if len(newNodes) == 0 {
+			attachNodeList = expandStringList(oldNodes)
+		}
+		for _, v := range ret {
+			for _, name := range attachNodeList {
+				if name == v.InstanceId {
+					removeInstanceList = append(removeInstanceList, v.NodeName)
+				}
+			}
+		}
+		removeNodesName = removeInstanceList
 	}
 
 	removeNodesArgs := &cs.DeleteKubernetesClusterNodesRequest{
@@ -1120,6 +1550,63 @@ func removeNodePoolNodes(d *schema.ResourceData, meta interface{}, parseId []str
 	}
 
 	d.SetPartial("node_count")
+
+	return nil
+}
+
+func attachExistingInstance(d *schema.ResourceData, meta interface{}) error {
+	csService := CsService{meta.(*connectivity.AliyunClient)}
+	client, err := meta.(*connectivity.AliyunClient).NewRoaCsClient()
+	if err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, ResourceName, "InitializeClient", err)
+	}
+
+	parts, err := ParseResourceId(d.Id(), 2)
+	if err != nil {
+		return WrapError(err)
+	}
+	clusterId := parts[0]
+	nodePoolId := parts[1]
+
+	args := &roacs.AttachInstancesRequest{
+		NodepoolId:       tea.String(nodePoolId),
+		FormatDisk:       tea.Bool(false),
+		KeepInstanceName: tea.Bool(true),
+	}
+
+	if v, ok := d.GetOk("password"); ok {
+		args.Password = tea.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("key_name"); ok {
+		args.KeyPair = tea.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("format_disk"); ok {
+		args.FormatDisk = tea.Bool(v.(bool))
+	}
+
+	if v, ok := d.GetOk("keep_instance_name"); ok {
+		args.KeepInstanceName = tea.Bool(v.(bool))
+	}
+
+	if v, ok := d.GetOk("image_id"); ok {
+		args.ImageId = tea.String(v.(string))
+	}
+
+	if v, ok := d.GetOk("instances"); ok {
+		args.Instances = tea.StringSlice(expandStringList(v.([]interface{})))
+	}
+
+	_, err = client.AttachInstances(tea.String(clusterId), args)
+	if err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, ResourceName, "AttachInstances", AliyunTablestoreGoSdk)
+	}
+
+	stateConf := BuildStateConf([]string{"scaling"}, []string{"active"}, d.Timeout(schema.TimeoutUpdate), 30*time.Second, csService.CsKubernetesNodePoolStateRefreshFunc(d.Id(), []string{"deleting", "failed"}))
+	if _, err := stateConf.WaitForState(); err != nil {
+		return WrapErrorf(err, IdMsg, d.Id())
+	}
 
 	return nil
 }

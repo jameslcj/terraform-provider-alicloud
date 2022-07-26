@@ -1,5 +1,5 @@
 ---
-subcategory: "Container Service for Kubernetes (CSK)"
+subcategory: "Container Service for Kubernetes (ACK)"
 layout: "alicloud"
 page_title: "Alicloud: alicloud_cs_edge_kubernetes"
 sidebar_current: "docs-alicloud-resource-cs-edge-kubernetes"
@@ -37,10 +37,10 @@ resource "alicloud_vpc" "vpc" {
 
 # According to the vswitch cidr blocks to launch several vswitches
 resource "alicloud_vswitch" "vswitches" {
-  count             = length(var.vswitch_ids) > 0 ? 0 : length(var.vswitch_cidrs)
-  vpc_id            = var.vpc_id == "" ? join("", alicloud_vpc.vpc.*.id) : var.vpc_id
-  cidr_block        = element(var.vswitch_cidrs, count.index)
-  availability_zone = element(var.availability_zone, count.index)
+  count      = length(var.vswitch_ids) > 0 ? 0 : length(var.vswitch_cidrs)
+  vpc_id     = var.vpc_id == "" ? join("", alicloud_vpc.vpc.*.id) : var.vpc_id
+  cidr_block = element(var.vswitch_cidrs, count.index)
+  zone_id    = element(var.availability_zone, count.index)
 }
 
 resource "alicloud_cs_edge_kubernetes" "k8s" {
@@ -55,17 +55,17 @@ resource "alicloud_cs_edge_kubernetes" "k8s" {
   password              = var.password
   service_cidr          = var.service_cidr
   pod_cidr              = var.pod_cidr
-  # version can not be defined in variables.tf. Options: 1.14.8-aliyunedge.1|1.12.6-aliyunedge.2
-  version               = "1.12.6-aliyunedge.2"
+  # version can not be defined in variables.tf.
+  version               = "1.20.11-aliyunedge.1"
 
   dynamic "addons" {
       for_each = var.cluster_addons
       content {
-        name                    = lookup(addons.value, "name", var.cluster_addons)
-        config                  = lookup(addons.value, "config", var.cluster_addons)
+        name   = lookup(addons.value, "name", var.cluster_addons)
+        config = lookup(addons.value, "config", var.cluster_addons)
       }
   }
-  slb_internet_enabled = var.slb_enabled
+  slb_internet_enabled         = var.slb_enabled
   is_enterprise_security_group = var.enterprise_sg
 }
 
@@ -87,6 +87,7 @@ The following arguments are supported:
 * `deletion_protection` - (Optional, Available in 1.103.2+)  Whether to enable cluster deletion protection.
 * `force_update` - (Optional, ForceNew, Available in 1.113.0+) Default false, when you want to change `vpc_id`, you have to set this field to true, then the cluster will be recreated.
 * `tags` - (Optional, Available in 1.120.0+) Default nil, A map of tags assigned to the kubernetes cluster and work node.
+* `retain_resources` - (Optional, Available in 1.141.0+) Resources that are automatically created during cluster creation, including NAT gateways, SNAT rules, SLB instances, and RAM Role, will be deleted. Resources that are manually created after you create the cluster, such as SLB instances for Services, will also be deleted. If you need to retain resources, please configure with `retain_resources`. There are several aspects to pay attention to when using `retain_resources` to retain resources. After configuring `retain_resources` into the terraform configuration manifest file, you first need to run `terraform apply`.Then execute `terraform destroy`.
 
 ### Network params
 

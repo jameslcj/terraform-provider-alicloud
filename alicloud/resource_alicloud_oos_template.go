@@ -90,6 +90,11 @@ func resourceAlicloudOosTemplate() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
+			"resource_group_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+			},
 		},
 	}
 }
@@ -115,6 +120,9 @@ func resourceAlicloudOosTemplateCreate(d *schema.ResourceData, meta interface{})
 	request["TemplateName"] = d.Get("template_name")
 	if v, ok := d.GetOk("version_name"); ok {
 		request["VersionName"] = v
+	}
+	if v, ok := d.GetOk("resource_group_id"); ok {
+		request["ResourceGroupId"] = v
 	}
 
 	wait := incrementalWait(3*time.Second, 3*time.Second)
@@ -157,17 +165,24 @@ func resourceAlicloudOosTemplateRead(d *schema.ResourceData, meta interface{}) e
 	d.Set("description", object["Description"])
 	d.Set("has_trigger", object["HasTrigger"])
 	d.Set("share_type", object["ShareType"])
-	d.Set("tags", object["Tags"])
+	if v, ok := object["Tags"].(map[string]interface{}); ok {
+		d.Set("tags", tagsToMap(v))
+	}
 	d.Set("template_format", object["TemplateFormat"])
 	d.Set("template_id", object["TemplateId"])
 	d.Set("template_type", object["TemplateType"])
 	d.Set("template_version", object["TemplateVersion"])
 	d.Set("updated_by", object["UpdatedBy"])
 	d.Set("updated_date", object["UpdatedDate"])
+	d.Set("resource_group_id", object["ResourceGroupId"])
 	return nil
 }
 func resourceAlicloudOosTemplateUpdate(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*connectivity.AliyunClient)
+	conn, err := client.NewOosClient()
+	if err != nil {
+		return WrapError(err)
+	}
 	var response map[string]interface{}
 	update := false
 	request := map[string]interface{}{
@@ -190,12 +205,12 @@ func resourceAlicloudOosTemplateUpdate(d *schema.ResourceData, meta interface{})
 		update = true
 		request["VersionName"] = d.Get("version_name")
 	}
+	if d.HasChange("resource_group_id") {
+		update = true
+		request["ResourceGroupId"] = d.Get("resource_group_id")
+	}
 	if update {
 		action := "UpdateTemplate"
-		conn, err := client.NewOosClient()
-		if err != nil {
-			return WrapError(err)
-		}
 		wait := incrementalWait(3*time.Second, 3*time.Second)
 		err = resource.Retry(d.Timeout(schema.TimeoutUpdate), func() *resource.RetryError {
 			response, err = conn.DoRequest(StringPointer(action), nil, StringPointer("POST"), StringPointer("2019-06-01"), StringPointer("AK"), nil, request, &util.RuntimeOptions{})

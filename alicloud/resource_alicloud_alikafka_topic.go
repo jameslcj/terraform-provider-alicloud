@@ -56,7 +56,7 @@ func resourceAlicloudAlikafkaTopic() *schema.Resource {
 				Type:         schema.TypeInt,
 				Optional:     true,
 				Default:      12,
-				ValidateFunc: validation.IntBetween(0, 360),
+				ValidateFunc: validation.IntBetween(0, 800),
 			},
 			"remark": {
 				Type:         schema.TypeString,
@@ -127,10 +127,11 @@ func resourceAlicloudAlikafkaTopicCreate(d *schema.ResourceData, meta interface{
 
 func resourceAlicloudAlikafkaTopicUpdate(d *schema.ResourceData, meta interface{}) error {
 
+	instanceId := d.Get("instance_id").(string)
 	client := meta.(*connectivity.AliyunClient)
 	alikafkaService := AlikafkaService{client}
 	d.Partial(true)
-	if err := alikafkaService.setInstanceTags(d, TagResourceTopic); err != nil {
+	if err := alikafkaService.setInstanceTags(d, TagResourceTopic, instanceId); err != nil {
 		return WrapError(err)
 	}
 	if d.IsNewResource() {
@@ -138,7 +139,6 @@ func resourceAlicloudAlikafkaTopicUpdate(d *schema.ResourceData, meta interface{
 		return resourceAlicloudAlikafkaTopicRead(d, meta)
 	}
 
-	instanceId := d.Get("instance_id").(string)
 	if d.HasChange("remark") {
 		remark := d.Get("remark").(string)
 		topic := d.Get("topic").(string)

@@ -74,6 +74,7 @@ type UntagResourcesRequest struct {
 	All          requests.Boolean `position:"Query" name:"All"`
 	ResourceId   *[]string        `position:"Query" name:"ResourceId"  type:"Repeated"`
 	ResourceType string           `position:"Query" name:"ResourceType"`
+	InstanceId   string           `position:"Query" name:"InstanceId"`
 	TagKey       *[]string        `position:"Query" name:"TagKey"  type:"Repeated"`
 }
 

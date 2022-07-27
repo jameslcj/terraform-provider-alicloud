@@ -85,6 +85,7 @@ type StartInstanceRequest struct {
 	ZoneId               string           `position:"Query" name:"ZoneId"`
 	Config               string           `position:"Query" name:"Config"`
 	Username             string           `position:"Query" name:"Username"`
+	KmsKeyId             string           `position:"Query" name:"KmsKeyId"`
 }
 
 // StartInstanceResponse is the response struct for api StartInstance

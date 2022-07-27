@@ -212,6 +212,10 @@ func dataSourceAlicloudAlikafkaInstances() *schema.Resource {
 							Computed: true,
 						},
 						"tags": tagsSchema(),
+						"kms_key_id": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
 					},
 				},
 			},
@@ -322,6 +326,7 @@ func dataSourceAlicloudAlikafkaInstancesRead(d *schema.ResourceData, meta interf
 			"end_point":            object["EndPoint"],
 			"security_group":       object["SecurityGroup"],
 			"config":               object["AllConfig"],
+			"kms_key_id":           object["KmsKeyId"],
 			"expired_time":         object["ExpiredTime"],
 			"msg_retain":           object["MsgRetain"],
 			"ssl_end_point":        object["SslEndPoint"],

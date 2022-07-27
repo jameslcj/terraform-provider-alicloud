@@ -39,6 +39,7 @@ type InstanceVO struct {
 	SpecType                 string                   `json:"SpecType" xml:"SpecType"`
 	SecurityGroup            string                   `json:"SecurityGroup" xml:"SecurityGroup"`
 	AllConfig                string                   `json:"AllConfig" xml:"AllConfig"`
+	KmsKeyId                 string                   `json:"KmsKeyId" xml:"KmsKeyId"`
 	UpgradeServiceDetailInfo UpgradeServiceDetailInfo `json:"UpgradeServiceDetailInfo" xml:"UpgradeServiceDetailInfo"`
 	Tags                     TagsInGetInstanceList    `json:"Tags" xml:"Tags"`
 }

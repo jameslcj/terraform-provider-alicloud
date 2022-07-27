@@ -112,6 +112,10 @@ func resourceAlicloudAlikafkaInstance() *schema.Resource {
 				Computed: true,
 			},
 			"tags": tagsSchema(),
+			"kms_key_id": {
+				Type:         schema.TypeString,
+				Optional:     true,
+			},
 		},
 	}
 }
@@ -209,6 +213,9 @@ func resourceAlicloudAlikafkaInstanceCreate(d *schema.ResourceData, meta interfa
 	if v, ok := d.GetOk("config"); ok {
 		startInstanceReq.Config = v.(string)
 	}
+	if v, ok := d.GetOk("kms_key_id"); ok {
+		startInstanceReq.KmsKeyId = v.(string)
+	}
 
 	err = resource.Retry(5*time.Minute, func() *resource.RetryError {
 		raw, err := alikafkaService.client.WithAlikafkaClient(func(alikafkaClient *alikafka.Client) (interface{}, error) {
@@ -289,7 +296,7 @@ func resourceAlicloudAlikafkaInstanceUpdate(d *schema.ResourceData, meta interfa
 	client := meta.(*connectivity.AliyunClient)
 	alikafkaService := AlikafkaService{client}
 	d.Partial(true)
-	if err := alikafkaService.setInstanceTags(d, TagResourceInstance); err != nil {
+	if err := alikafkaService.setInstanceTags(d, TagResourceInstance, d.Id()); err != nil {
 		return WrapError(err)
 	}
 	if d.IsNewResource() {

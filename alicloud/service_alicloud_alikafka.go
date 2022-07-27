@@ -643,7 +643,7 @@ func (s *AlikafkaService) DescribeTags(resourceId string, resourceTags map[strin
 	return response.TagResources.TagResource, nil
 }
 
-func (s *AlikafkaService) setInstanceTags(d *schema.ResourceData, resourceType TagResourceType) error {
+func (s *AlikafkaService) setInstanceTags(d *schema.ResourceData, resourceType TagResourceType, instanceId string) error {
 	if d.HasChange("tags") {
 		oraw, nraw := d.GetChange("tags")
 		o := oraw.(map[string]interface{})
@@ -660,6 +660,7 @@ func (s *AlikafkaService) setInstanceTags(d *schema.ResourceData, resourceType T
 			request.ResourceType = string(resourceType)
 			request.TagKey = &tagKey
 			request.RegionId = s.client.RegionId
+			request.InstanceId = instanceId
 
 			wait := incrementalWait(2*time.Second, 1*time.Second)
 			err := resource.Retry(10*time.Minute, func() *resource.RetryError {
